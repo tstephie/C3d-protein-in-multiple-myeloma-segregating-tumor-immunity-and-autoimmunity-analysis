@@ -1,0 +1,793 @@
+---
+title: "MGDMB C3D scRNA-seq Analysis"
+author: "Stephanie The"
+date: '2022-06-03'
+output: html_document
+---
+
+# Packages
+```{r}
+library(tidyverse)
+library(readxl)
+library(Seurat)
+library(pheatmap)
+library(RColorBrewer)
+library(patchwork)
+library(cowplot)
+library(grid)
+library(gridExtra)
+
+```
+
+# Setup
+```{r}
+setwd('/nfs/turbo/cdsBfxShared/tstephie/cascalho/MGDMB/')
+
+```
+
+# Pre-Processing Pipeline
+## Import and create objects
+```{r}
+# import metadata
+## chose h5 file (for GE) and filtered contigs csv (for VDJ)
+metadata <- read_excel(paste0('tables/Multiple_Myeloma_10X_mice_list_v3.xlsx'), sheet = 2)
+
+# only chose subset of samples
+metadata <- metadata %>% filter(sample_name %in% c('VG1','VG2','AI3','AC5','AI1','AI2','DD2','GK3','OD2','OD4','OD1'))
+
+```
+
+```{r}
+# create Seurat objects
+obs <- sapply(1:nrow(metadata), function(i) 
+  CreateSeuratObject(
+    Read10X_h5(
+      paste0(metadata$file_path_filt_h5[i], 'filtered_feature_bc_matrix.h5')),
+    project = 'c3d_mgdmb', min.cells = 3, min.features = 100)
+)
+names(obs) <- metadata$sample_name
+
+# get # of cells in each object
+sample_cell_n_all <- unlist(sapply(obs, function(x) ncol(x)))
+
+```
+
+## Adding metadata
+```{r}
+col_ge <- colnames(metadata)[1:11]
+
+# adding general and VDJ metadata
+for (i in 1:length(obs)) {
+  
+  # general metadata
+  metadata_full <- data.frame(cell = colnames(obs[[i]]))
+  for (col in col_ge) {
+    temp <- rep(metadata[i,col,drop=T], times = sample_cell_n_all[i])
+    metadata_full <- cbind(metadata_full, temp)
+  }
+  metadata_full <- metadata_full %>% column_to_rownames("cell")
+  colnames(metadata_full) <- col_ge
+  
+  # VDJ metadata
+  y <- read_csv(paste0(metadata$file_path_filt_csv[i], 'filtered_contig_annotations.csv'))
+  ## only get productive clones and some columns
+  y <- y[y$productive,]
+  y <- y[,c("barcode","chain","v_gene","d_gene","j_gene","c_gene","cdr3","cdr3_nt","reads","umis","raw_clonotype_id","raw_consensus_id")]
+  
+  ## filter out clones from barcodes that are not in GE samples
+  y <- y[y$barcode %in% colnames(obs[[i]]),]
+  
+  ## collapse duplicated barcode rows
+  y1 <- data.frame(cell = unique(y$barcode))
+  
+  for (col in colnames(y)[-1]) {
+    temp <- sapply(y1$cell, function(j) paste(y[y$barcode == j,col,drop=T], collapse = ','))
+    y1 <- cbind(y1, temp)
+  }
+  rownames(y1) <- NULL
+  colnames(y1)[-1] <- colnames(y)[-1]
+  
+  ## make df for rest of cells with all columns as 'None'
+  y2 <- data.frame(cell = colnames(obs[[i]])[!colnames(obs[[i]]) %in% y1$cell])
+  for (col in colnames(y)[-1]) {
+    temp <- rep('None', times = nrow(y2)) #sample_cell_n_all[i]
+    y2 <- cbind(y2, temp)
+  }
+  colnames(y2)[-1] <- colnames(y)[-1]
+  
+  ## combine 2 VDJ tables together
+  y3 <- rbind(y1,y2)
+  y3 <- y3 %>% column_to_rownames('cell')
+  y3 <- y3[rownames(metadata_full),]
+  
+  # combine general and VDJ tables together
+  metadata_full <- cbind(metadata_full, y3)
+
+  # add metadata to object
+  obs[[i]] <- AddMetaData(obs[[i]], metadata_full)
+}
+
+```
+
+## QC
+### Calculate mitocondrial and ribosomal reads
+```{r}
+for (i in 1:length(obs)) {
+  obs[[i]]$percent.mt <- PercentageFeatureSet(obs[[i]], pattern = "^mt-")
+  obs[[i]]$percent.rb <- PercentageFeatureSet(obs[[i]], pattern = '^Rp[sl]')
+}
+
+```
+
+### Before Filtering
+```{r}
+# export no line plots
+for (i in 1:length(obs)) {
+  # vlnplot (no lines)
+  file_name_1 <- paste0('plots/qc/qc_vln_before_',metadata$sample_id[i],'.png')
+  png(filename = file_name_1, width = 500, height = 500)
+  print(VlnPlot(obs[[i]], features = c("nCount_RNA", "nFeature_RNA", "percent.mt", "percent.rb"), ncol = 4, pt.size = .5))
+  dev.off()
+
+  # feature scatter (no lines)
+  file_name_2 <- paste0('plots/qc/qc_featurescatter_before_',metadata$sample_id[i],'.png')
+  plot1 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "percent.rb")
+  plot3 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot4 <- FeatureScatter(object = obs[[i]], feature1 = "percent.mt", feature2 = "percent.rb")
+  png(filename = file_name_2, width = 800, height = 800)
+  print(wrap_plots(plot1, plot2, plot3, plot4, ncol = 2, nrow = 2))
+  dev.off()
+
+}
+
+```
+
+### Picking Thresholds
+```{r}
+# get range of QC variables for each sample object
+nCount_RNA_range <- sapply(obs, function(x) list(range(x$nCount_RNA)))
+nFeature_RNA_range <- sapply(obs, function(x) list(range(x$nFeature_RNA)))
+percent.mt_range <- sapply(obs, function(x) list(range(x$percent.mt)))
+percent.rb_range <- sapply(obs, function(x) list(range(x$percent.rb)))
+
+# filtering thresholds for each QC variable for each sample object
+vln_y_line <- list(
+  
+  # AC5
+  list(nCount_RNA = c(nCount_RNA_range[[1]][1],2.5e4),
+       nFeature_RNA = c(nFeature_RNA_range[[1]][1], 4000),
+       percent.mt = c(percent.mt_range[[1]][1],25),
+       percent.rb = c(percent.rb_range[[1]][1],percent.rb_range[[1]][2])),
+  
+  # AI1
+  list(nCount_RNA = c(nCount_RNA_range[[2]][1],5e4),
+       nFeature_RNA = c(nFeature_RNA_range[[2]][1], 6000),
+       percent.mt = c(percent.mt_range[[2]][1],20),
+       percent.rb = c(percent.rb_range[[2]][1],percent.rb_range[[2]][2])),
+  
+  # AI2
+  list(nCount_RNA = c(nCount_RNA_range[[3]][1],5.5e4),
+       nFeature_RNA = c(nFeature_RNA_range[[3]][1], 6000),
+       percent.mt = c(percent.mt_range[[3]][1],20),
+       percent.rb = c(percent.rb_range[[3]][1],percent.rb_range[[3]][2])),
+  
+  # AI3
+  list(nCount_RNA = c(nCount_RNA_range[[4]][1],5e4),
+       nFeature_RNA = c(nFeature_RNA_range[[4]][1], 6000),
+       percent.mt = c(percent.mt_range[[4]][1],20),
+       percent.rb = c(percent.rb_range[[4]][1],percent.rb_range[[4]][2])),
+  
+  # DD2
+  list(nCount_RNA = c(nCount_RNA_range[[5]][1],4e4),
+       nFeature_RNA = c(nFeature_RNA_range[[5]][1], 5500),
+       percent.mt = c(percent.mt_range[[5]][1],15),
+       percent.rb = c(percent.rb_range[[5]][1],percent.rb_range[[5]][2])),
+  
+  # GK3
+  list(nCount_RNA = c(nCount_RNA_range[[6]][1],4e4),
+       nFeature_RNA = c(nFeature_RNA_range[[6]][1], 6000),
+       percent.mt = c(percent.mt_range[[6]][1],15),
+       percent.rb = c(percent.rb_range[[6]][1],percent.rb_range[[6]][2])),
+  
+  # OD1
+  list(nCount_RNA = c(nCount_RNA_range[[7]][1],5e4),
+       nFeature_RNA = c(nFeature_RNA_range[[7]][1], 6000),
+       percent.mt = c(percent.mt_range[[7]][1],20),
+       percent.rb = c(percent.rb_range[[7]][1],percent.rb_range[[7]][2])),
+  
+  # OD2
+  list(nCount_RNA = c(nCount_RNA_range[[8]][1],5e4),
+       nFeature_RNA = c(nFeature_RNA_range[[8]][1], 6000),
+       percent.mt = c(percent.mt_range[[8]][1],15),
+       percent.rb = c(percent.rb_range[[8]][1],percent.rb_range[[8]][2])),
+  
+  # OD4
+  list(nCount_RNA = c(nCount_RNA_range[[9]][1],4e4),
+       nFeature_RNA = c(nFeature_RNA_range[[9]][1], 6000),
+       percent.mt = c(percent.mt_range[[9]][1],20),
+       percent.rb = c(percent.rb_range[[9]][1],percent.rb_range[[9]][2])),
+  
+  # VG1
+  list(nCount_RNA = c(nCount_RNA_range[[10]][1],2e4),
+       nFeature_RNA = c(nFeature_RNA_range[[10]][1], 3500),
+       percent.mt = c(percent.mt_range[[10]][1],20),
+       percent.rb = c(percent.rb_range[[10]][1],percent.rb_range[[10]][2])),
+  
+  # VG2
+  list(nCount_RNA = c(nCount_RNA_range[[11]][1],3e4),
+       nFeature_RNA = c(nFeature_RNA_range[[11]][1], 5000),
+       percent.mt = c(percent.mt_range[[11]][1],15),
+       percent.rb = c(percent.rb_range[[11]][1],percent.rb_range[[11]][2]))
+)
+
+```
+
+```{r}
+# exporting line plots
+for (i in 1:length(obs)) {
+  # vlnplot (lines)
+  file_name_1 <- paste0('plots/qc/qc_vln_before_line_',metadata$sample_id[i],'.png')
+  plot1 <- VlnPlot(obs[[i]], features = c("nCount_RNA"), pt.size = 0) & geom_hline(yintercept = c(vln_y_line[[i]][[1]][1], vln_y_line[[i]][[1]][2])) & theme(legend.position = 'none')
+  plot2 <- VlnPlot(obs[[i]], features = c("nFeature_RNA"), pt.size = 0) & geom_hline(yintercept = c(vln_y_line[[i]][[2]][1], vln_y_line[[i]][[2]][2])) & theme(legend.position = 'none')
+  plot3 <- VlnPlot(obs[[i]], features = c("percent.mt"), pt.size = 0) & geom_hline(yintercept = c(vln_y_line[[i]][[3]][1], vln_y_line[[i]][[3]][2])) & theme(legend.position = 'none')
+  plot4 <- VlnPlot(obs[[i]], features = c("percent.rb"), pt.size = 0) & geom_hline(yintercept = c(vln_y_line[[i]][[4]][1], vln_y_line[[i]][[4]][2])) & theme(legend.position = 'none')
+
+  png(filename = file_name_1, width = 500, height = 500)
+  print(wrap_plots(plot1, plot2, plot3, plot4, ncol = 2, nrow = 2))
+  dev.off()
+
+  # feature scatter (lines)
+  file_name_2 <- paste0('plots/qc/qc_featurescatter_before_line_',metadata$sample_id[i],'.png')
+  plot1 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt") + geom_hline(yintercept = c(vln_y_line[[i]][[3]][1], vln_y_line[[i]][[3]][2])) + geom_vline(xintercept = c(vln_y_line[[i]][[1]][1], vln_y_line[[i]][[1]][2])) + theme(legend.position = 'none')
+  plot2 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "percent.rb") & geom_hline(yintercept = c(vln_y_line[[i]][[4]][1], vln_y_line[[i]][[4]][2])) & geom_vline(xintercept = c(vln_y_line[[i]][[1]][1], vln_y_line[[i]][[1]][2])) & theme(legend.position = 'none')
+  plot3 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA") & geom_hline(yintercept = c(vln_y_line[[i]][[2]][1], vln_y_line[[i]][[2]][2])) & geom_vline(xintercept = c(vln_y_line[[i]][[1]][1], vln_y_line[[i]][[1]][2])) & theme(legend.position = 'none')
+  plot4 <- FeatureScatter(object = obs[[i]], feature1 = "percent.mt", feature2 = "percent.rb") & geom_hline(yintercept = c(vln_y_line[[i]][[4]][1], vln_y_line[[i]][[4]][2])) & geom_vline(xintercept = c(vln_y_line[[i]][[3]][1], vln_y_line[[i]][[3]][2])) & theme(legend.position = 'none')
+
+  png(filename = file_name_2, width = 800, height = 800)
+  print(plot1 + plot2 + plot3 + plot4)
+  dev.off()
+}
+
+```
+
+### Filtering
+```{r}
+for (i in 1:length(obs)) {
+  obs[[i]] <- subset(obs[[i]], subset = (nCount_RNA >= vln_y_line[[i]][[1]][1] & nCount_RNA <= vln_y_line[[i]][[1]][2]) & (nFeature_RNA >= vln_y_line[[i]][[2]][1] & nFeature_RNA <= vln_y_line[[i]][[2]][2]) & (percent.mt >= vln_y_line[[i]][[3]][1] & percent.mt <= vln_y_line[[i]][[3]][2]) & (percent.rb >= vln_y_line[[i]][[4]][1] & percent.rb <= vln_y_line[[i]][[4]][2]))
+}
+
+```
+
+### After Filtering
+```{r}
+# export no line plots
+for (i in 1:length(obs)) {
+  # vlnplot (no lines)
+  file_name_1 <- paste0('plots/qc/qc_vln_after_',metadata$sample_id[i],'.png')
+  png(filename = file_name_1, width = 500, height = 500)
+  print(VlnPlot(obs[[i]], features = c("nCount_RNA", "nFeature_RNA", "percent.mt", "percent.rb"), ncol = 4, pt.size = .5))
+  dev.off()
+
+  # feature scatter (no lines)
+  file_name_2 <- paste0('plots/qc/qc_featurescatter_after_',metadata$sample_id[i],'.png')
+  plot1 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "percent.rb")
+  plot3 <- FeatureScatter(object = obs[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot4 <- FeatureScatter(object = obs[[i]], feature1 = "percent.mt", feature2 = "percent.rb")
+  png(filename = file_name_2, width = 800, height = 800)
+  print(wrap_plots(plot1, plot2, plot3, plot4, ncol = 2, nrow = 2))
+  dev.off()
+
+}
+
+```
+
+```{r}
+# get # of cells in each object after filtering
+unlist(sapply(obs, function(x) ncol(x)))
+
+```
+
+## Unbatched Analysis
+### Merge objects
+```{r}
+more_obs <- paste0("c(",paste(sapply(2:length(obs),function(i) paste0("obs[[",i,"]]")),collapse=",",sep=""),")")
+merged_ob <- merge(obs[[1]], eval(parse(text=more_obs)), add.cell.ids = metadata$sample_id)
+
+```
+
+### Normalization
+```{r}
+merged_ob <- NormalizeData(merged_ob)
+
+```
+
+### Find Variable Features
+
+```{r}
+merged_ob <- FindVariableFeatures(merged_ob)
+
+```
+
+```{r}
+# find variable features scatter plot
+top10_list <- head(VariableFeatures(merged_ob), 10)
+p1 <- VariableFeaturePlot(merged_ob)
+p2 <- LabelPoints(plot = p1, points = top10_list)
+
+png(filename = 'plots/qc/c3d_mgdmb_variablefeatures_unbatch.png', width = 800, height = 500)
+print(p1+p2)
+dev.off()
+
+```
+
+### Check Cell Cycle Batch
+
+We checked for cell cycle batch effects, but we decided not to correct for it.
+
+```{r}
+# mouse cc genes
+cc_genes <- readRDS("mouse_cell_cycle_genes.rds")
+
+# calculate scores
+merged_ob <- CellCycleScoring(merged_ob, s.features = cc_genes$s.genes, g2m.features = cc_genes$g2m.genes, set.ident = TRUE)
+
+# scale data on cc genes
+merged_ob <- ScaleData(merged_ob, features = c(cc_genes$s.genes, cc_genes$g2m.genes), verbose = F)
+
+# run PCA on cc genes
+merged_ob <- RunPCA(merged_ob, features = c(cc_genes$s.genes, cc_genes$g2m.genes), 
+                    nfeatures.print = 5, reduction.name = 'cc_pca', verbose = F, reduction.key = 'ccPCA_')
+
+# plot PCA of cc phases
+png(filename = "plots/qc/c3d_mgdmb_cc_pca_unbatch.png", width = 500, height = 500)
+print(DimPlot(merged_ob, reduction = 'cc_pca', group.by = c('Phase')))
+dev.off()
+
+```
+
+### Scaling
+```{r}
+merged_ob <- ScaleData(merged_ob, vars.to.regress = 'nCount_RNA') 
+
+```
+
+### PCA
+```{r}
+merged_ob <- RunPCA(merged_ob, features = VariableFeatures(merged_ob),  nfeatures.print = 5, reduction.name = 'pca_unbatch')
+
+```
+
+```{r fig.height=5, fig.width=5}
+# qualitative
+png(filename = "plots/qc/c3d_mgdmb_pca_elbowplot_unbatch.png", width = 500, height = 500)
+print(ElbowPlot(object = merged_ob, ndims = 50, reduction = 'pca_unbatch'))
+dev.off()
+
+```
+
+```{r}
+# quantitative
+pct <- merged_ob@reductions$unbatch_pca@stdev / sum(merged_ob@reductions$unbatch_pca@stdev) * 100 
+cum <- cumsum(pct) 
+co1 <- which(cum > 90 & pct < 5)[1] 
+co2 <- sort(which((pct[1:length(pct)-1] - pct[2:length(pct)]) > .1), decreasing = T)[1] + 1
+pcs <- min(co1, co2) # pcs
+
+```
+
+```{r}
+# PCA plot for to check for batch effect
+png(filename = "plots/qc/c3d_mgdmb_pca_unbatch_batch.png", width = 1000, height = 1000)
+print(DimPlot(merged_ob, reduction = 'pca_unbatch', group.by = c('run_id','gender','dob','treatment','cage_id'), ncol = 2))
+dev.off()
+
+```
+
+### Clustering
+```{r}
+merged_ob <- FindNeighbors(merged_ob, dims = 1:pcs, k.param = 20)
+merged_ob <- FindClusters(merged_ob)
+
+# look at how many clusters we get 
+head(Idents(merged_ob), 5)
+
+# store clusters in metadata slot
+merged_ob$unbatch_clusters <- Idents(merged_ob)
+
+```
+
+### UMAP
+```{r}
+merged_ob <- RunUMAP(merged_ob, dims = 1:pcs, reduction.name = 'umap_unbatch', reduction = 'pca_unbatch')
+
+png("plots/umap/c3d_mgdmb_umap_unbatch_clusters_no_labels.png", width = 600, height = 600)
+print(DimPlot(object = merged_ob, reduction = 'umap_unbatch', group.by = c('unbatch_clusters'), raster = F))
+dev.off()
+
+png("plots/umap/c3d_mgdmb_umap_unbatch_clusters_labels.png", width = 600, height = 600)
+print(DimPlot(object = merged_ob, reduction = 'umap_unbatch', group.by = c('unbatch_clusters'), label = T, raster = F))
+dev.off()
+
+png("plots/umap/c3d_mgdmb_umap_unbatch_clusters_run_id.png", width = 800, height = 600)
+print(DimPlot(object = merged_ob, reduction = 'umap_unbatch', group.by = c('unbatch_clusters', 'run_id'), raster = F))
+dev.off()
+
+```
+
+### Save Unbatch Object
+```{r}
+saveRDS(merged_ob, 'c3d_mgdmb_unbatch_ob.rds')
+
+```
+
+## Integration Analysis
+### Split Merged Object by Batch
+```{r}
+merged_ob <- readRDS('c3d_mgdmb_unbatch_ob.rds')
+obs <- SplitObject(merged_ob, split.by = 'run_id')
+
+rm(merged_ob)
+gc()
+
+```
+
+### Normalization & Variable Features
+```{r}
+for (i in 1:length(obs)) {
+  obs[[i]] <- NormalizeData(obs[[i]], verbose = F)
+  obs[[i]] <- FindVariableFeatures(obs[[i]], selection.method = 'vst', nfeatures = 2000, verbose = F)
+}
+
+```
+
+### Integration
+```{r}
+# find integration features/genes
+genes <- SelectIntegrationFeatures(obs)
+
+# find anchors 
+anchors <- FindIntegrationAnchors(object.list = obs, dims = 1:50, reduction = 'rpca')
+gc()
+
+# find the intersection of genes among objects
+all_genes <- lapply(obs, rownames) %>% Reduce(intersect, .)
+
+# integrate objects
+integrate <- IntegrateData(anchorset = anchors, dims = 1:50, features.to.integrate = all_genes)
+gc()
+
+# change assay to integrated slot
+DefaultAssay(integrate) <- 'integrated'
+
+```
+
+### Scaling
+```{r}
+integrate <- ScaleData(integrate, vars.to.regress = c('nCount_RNA'), verbose = F)
+
+```
+
+### PCA
+```{r}
+integrate <- RunPCA(object = integrate, features = VariableFeatures(object = integrate), nfeatures.print = 5, reduction.name = 'pca_integrated', reduction.key = 'intPCA_', verbose = F)
+
+```
+
+```{r}
+# qualitative
+png(filename = "plots/qc/c3d_mgdmb_pca_elbowplot_integrated.png", width = 500, height = 500)
+print(ElbowPlot(object = integrate, ndims = 50, reduction = 'pca_integrated'))
+dev.off()
+
+```
+
+```{r}
+# quantitative
+pct <- integrate@reductions$pca_integrated@stdev / sum(integrate@reductions$pca_integrated@stdev) * 100
+cum <- cumsum(pct)
+co1 <- which(cum > 90 & pct < 5)[1]
+co2 <- sort(which((pct[1:length(pct)-1] - pct[2:length(pct)]) > .1), decreasing = T)[1] + 1
+pcs <- min(co1, co2) # pcs
+
+```
+
+```{r}
+# PCA plot for to check for batch effect
+png(filename = "plots/qc/c3d_mgdmb_pca_integrate_batch.png", width = 1000, height = 1000)
+print(DimPlot(integrate, reduction = 'pca_integrated', group.by = c('run_id','gender','dob','treatment','cage_id'), ncol = 2))
+dev.off()
+
+```
+
+### Clustering
+```{r}
+integrate <- FindNeighbors(integrate, reduction = 'pca_integrated', dims = 1:pcs, k.param = 20, verbose = F)
+integrate <- FindClusters(integrate, resolution = 0.5, verbose = F)
+
+# look at how many clusters we get 
+head(Idents(integrate), 5)
+
+# store clusters in metadata slot
+integrate$integrate_clusters <- Idents(integrate)
+
+```
+
+### UMAP
+```{r}
+integrate <- RunUMAP(integrate, dims = 1:pcs, reduction = 'pca_integrated', reduction.name = 'umap_integrated', reduction.key = 'intUMAP_', verbose = F)
+
+png("plots/umap/c3d_mgdmb_umap_integrate_clusters_no_labels.png", width = 600, height = 600)
+print(DimPlot(object = integrate, reduction = 'umap_integrated', group.by = c('integrate_clusters'), raster = F))
+dev.off()
+
+png("plots/umap/c3d_mgdmb_umap_integrate_clusters_labels.png", width = 600, height = 600)
+print(DimPlot(object = integrate, reduction = 'umap_integrated', group.by = c('integrate_clusters'), label = T, raster = F))
+dev.off()
+
+png("plots/umap/c3d_mgdmb_umap_integrate_clusters_run_id.png", width = 800, height = 600)
+print(DimPlot(object = integrate, reduction = 'umap_integrated', group.by = c('integrate_clusters', 'run_id'), raster = F))
+dev.off()
+
+```
+
+### Save Integrated Object
+```{r}
+saveRDS(integrate, 'c3d_mgdmb_integrated_ob.rds')
+
+```
+
+## Cluster DE
+```{r}
+# unbatched analysis
+integrate <- readRDS('c3d_mgdmb_integrated_ob.rds')
+
+de <- FindAllMarkers(integrate, assay = 'RNA')
+write_csv(de, 'tables/c3d_mgdmb_integrate_clusters_de_unbatch_all.csv')
+write_csv(de %>% filter(padj < .05), 'tables/c3d_mgdmb_integrate_clusters_de_unbatch_filt.csv')
+
+```
+
+```{r}
+# batch analysis
+de <- FindAllMarkers(integrate, assay = 'RNA', test.use = 'LR', latent.vars = 'run_id')
+write_csv(de, 'tables/c3d_mgdmb_integrate_clusters_de_batch_all.csv')
+write_csv(de %>% filter(padj < .05), 'tables/c3d_mgdmb_integrate_clusters_de_batch_filt.csv')
+
+```
+
+## Cell Annotations
+We looked at a combination of cluster DE genes and common gene markers to figure out cell type annotations for each cluster. 
+
+Gene markers:
+
+  + granulocyte = Ptprc+ S100a8+ S100a9+ Cd33+ Ly6g+ Ly6c2_lo Itgam_hi
+  + B = Cd79a+ Cd19+ Ms4a1+
+  + monocyte/macrophages = Ly6c2_hi Cd68+ Adgre1+ Itgam_lo Cd14+Ccr2+
+  + erythroid = Hba-a1+ Hba-a2+
+  + T/NK = Ptprc+ Cd3d+ Cd3e+ Cd4+ Foxp3+ Cd8a+ Nkg7+ Klrg1+ Gzma+
+  + plasma = Sdc1+ Xbp1+ Ccr10+ Prdm1+
+  + pDC = Siglech, Irf8
+  + HSC (hematopoietic stem cells) = Cdk6+ Kit+ Adgrg1+
+  + platelets = Pf4+ Itga2b+ Gp1ba+ Tubb1+ Ppbp+
+  + fibroblast = Col1a1+ Col1a2+ Loxl1+ Lum+ Fbln1+ Pdgfra+
+
+
+```{r}
+# DE tables
+de <- read_csv('tables/c3d_mgdmb_integrate_clusters_de_unbatch_filt.csv')
+de_1 <- read_csv('tables/c3d_mgdmb_integrate_clusters_de_batch_filt.csv')
+
+# change assay slots
+DefaultAssay(integrate) <- 'RNA'
+
+```
+
+```{r}
+# Cluster gene marker dot plot
+genes <- c('Col1a1', 'Col1a2', 'Loxl1', 'Lum', 'Hba-a1', 'Hba-a2', 'Pf4', 'Itga2b', 'Gp1ba', 'Tubb1', 'Ppbp', 'Cdk6', 'Kit', 'Adgrg1', 'Ptprc', 'Cd3d', 'Cd3e', 'Cd4', 'Foxp3', 'Cd8a', 'Nkg7', 'Klrg1', 'Gzma', 'Cd79a', 'Cd19', 'Ms4a1', 'Sdc1', 'Xbp1', 'Ccr10', 'Prdm1', 'S100a8','S100a9','Cd33','Ly6g','Ly6c2', 'Prss34','Mcpt8', 'Cd68','Adgre1','Itgam','Cd14','Mrc1', 'Ccr2', 'Siglech','Irf8')
+png('plots/express/c3d_mgdmb_integrate_clusters_dotplot.png', width = 1000, height = 600)
+print(DotPlot(integrate, features = genes) + RotatedAxis())
+dev.off()
+
+```
+
+```{r}
+# Creating cell type annotations for each cluster
+new_clusters <- c('granulocyte','granulocyte','granulocyte','B','B','monocyte/macrophage','granulocyte','erythroid','monocyte/macrophage','T/NK','plasma','granulocyte','erythroid','monocyte/macrophage','B','pDC','HSC','granulocyte','granulocyte','monocyte/macrophage','monocyte/macrophage','platelet','fibroblast','erythroid')
+names(new_clusters) <- 0:23
+
+integrate <- RenameIdents(integrate, new_clusters)
+integrate$annote_1 <- Idents(integrate)
+```
+
+```{r}
+integrate$annote_1 <- factor(integrate$annote_1, levels = rev(c('HSC','fibroblast','erythroid','platelet','T/NK','B','plasma','granulocyte','monocyte/macrophage','pDC')))
+
+x <- c('pDC', 'Monocytes/Macrophages', 'Granulocytes', 'Plasma Cells', 'B Cells', 'T/NK Cells', 'Platelets','Erythroid Cells', 'Fibroblasts', 'HSC')
+names(x) <- levels(integrate$annote_1)
+x1 <- c('#F8766D','#39B600','#D89000','#00BF7D','#A3A500','#00BFC4','#E76BF3','#00B0F6','#FF62BC','#9590FF')
+names(x1) <- levels(integrate$annote_1)
+
+# UMAP (annotated clusters)
+p <- DimPlot(object = integrate, reduction = 'umap_integrated', group.by = 'annote_1', raster = F) + labs(title= '', x='UMAP1', y='UMAP2') + theme(legend.text = element_text(size = 12)) + guides(color = guide_legend(override.aes = list(size = 5))) + scale_color_manual(values = x1, labels = x)
+
+tiff("final_figures/c3d_mgdmb_umap_annote_1_no_labels.tiff", width = 700, height = 650)
+print(p)
+dev.off()
+
+p <- DimPlot(object = integrate, reduction = 'umap_integrated', group.by = 'annote_1', raster = F, label = T) + labs(title= '', x='UMAP1', y='UMAP2') + theme(legend.text = element_text(size = 12)) + guides(color = guide_legend(override.aes = list(size = 5))) + scale_color_manual(values = x1, labels = x)
+
+tiff("final_figures/c3d_mgdmb_umap_annote_1_labels.tiff", width = 700, height = 650)
+print(p)
+dev.off()
+
+# UMAP (annotated clusters; split by treatment)
+## FIGURE S3A
+p <- DimPlot(object = integrate, reduction = 'umap_integrated', group.by = 'annote_1', raster = F, split.by = 'treatment') + labs(title= '', x='UMAP1', y='UMAP2') + theme(legend.text = element_text(size = 12)) + guides(color = guide_legend(override.aes = list(size = 5))) + scale_color_manual(values = x1, labels = x)
+
+tiff("final_figures/c3d_mgdmb_umap_annote_1_split_treatment_no_labels.tiff", width = 1000, height = 550)
+print(p)
+dev.off()
+
+# UMAP (annotated clusters; split by sample)
+## FIGURE S3B
+p <- DimPlot(object = integrate, reduction = 'umap_integrated', group.by = 'annote_1', raster = F, split.by = 'sample_name', ncol = 4) + labs(title= '', x='UMAP1', y='UMAP2') + theme(legend.text = element_text(size = 12)) + guides(color = guide_legend(override.aes = list(size = 5))) + scale_color_manual(values = x1, labels = x)
+
+tiff("final_figures/c3d_mgdmb_umap_annote_1_split_sample_no_labels.tiff", width = 1000, height = 900)
+print(p)
+dev.off()
+
+```
+
+```{r}
+# Refined cluster gene marker dot plot
+## FIGURE S3C
+genes <- c('Cdk6', 'Kit', 'Adgrg1', 'Col1a1', 'Col1a2', 'Loxl1', 'Lum', 'Hba-a1', 'Hba-a2', 'Pf4', 'Itga2b', 'Gp1ba', 'Tubb1', 'Ppbp', 'Ptprc', 'Cd3d', 'Cd3e', 'Cd4', 'Foxp3', 'Cd8a', 'Nkg7', 'Klrg1', 'Gzma', 'Cd79a', 'Cd19', 'Ms4a1', 'Sdc1', 'Xbp1', 'Ccr10', 'Prdm1', 'Ly6c2', 'Itgam', 'S100a8','S100a9','Cd33','Ly6g', 'Prss34','Mcpt8', 'Cd68','Adgre1','Cd14','Mrc1', 'Ccr2', 'Siglech','Irf8')
+
+p <- DotPlot(integrate, group.by = 'annote_1', features = genes) + RotatedAxis() + labs(x = 'Gene Makers', y = '') + scale_y_discrete(labels = c('pDC', 'Monocytes/Macrophages', 'Granulocytes', 'Plasma Cells', 'B Cells', 'T/NK Cells', 'Platelets','Erythroid Cells', 'Fibroblasts', 'HSC'))
+
+tiff('final_figures/c3d_mgdmb_annote_1_dotplot.tiff', width = 1200, height = 500)
+print(p)
+dev.off()
+
+```
+
+
+```{r}
+# save annotated object
+saveRDS(integrate, 'c3d_mgdmb_integrated_ob_annote_1.rds')
+
+```
+
+# Frequency Clone Tables
+```{r}
+# total # of plasma and total per sample
+
+integrate <- readRDS('c3d_mgdmb_integrated_ob_annote_1.rds')
+DefaultAssay(integrate) <- 'RNA'
+
+df <- data.frame()
+
+x <- as.data.frame(table(integrate$sample_name))
+x1 <- as.data.frame(table(clone_df$sample_name))
+
+integrate <- subset(integrate, annote_1 == 'plasma' & (Sdc1 > 0 | Xbp1 > 0 | Prdm1 > 0))
+
+x2 <- as.data.frame(table(integrate$sample_name))
+
+df <- data.frame(sample = x$Var1, total = x$Freq, total_plasma = x1$Freq, total_plasma_filt = x2$Freq)
+
+write_csv(df, 'c3d_mgdmb_plasma_total_cells_freq_table.csv')
+
+```
+
+# Plasma Cell Analysis
+```{r}
+# genes from paper
+fig_up_genes <- read_excel('gene_expression_in_MM_fig2a_data.xlsx', sheet = 1) %>% deframe()
+fig_down_genes <- read_excel('gene_expression_in_MM_fig2a_data.xlsx', sheet = 2) %>% deframe()
+
+```
+
+```{r}
+# get plasma cells
+clone_df <- FetchData(integrate, vars = c('sample_name','annote_1','hMYC','chain','raw_clonotype_id')) %>% filter(annote_1 == 'plasma')
+clone_df$hMYC_pos <- ifelse(clone_df$hMYC > 0, yes = T, no = F)
+clone_df$is_clone <- ifelse(clone_df$chain != 'None', yes = T, no = F)
+clone_df$is_h <- ifelse(grepl('IGH',clone_df$chain), yes = T, no = F)
+clone_df$clone <- sapply(clone_df$raw_clonotype_id, function(i) unique(strsplit(i, ',')[[1]]))
+clone_df$sample_clone <- paste0(clone_df$sample_name, '_', clone_df$clone)
+
+```
+
+```{r}
+# calculate malignant and non-malignant scores
+## Cluster1 = upregulated/malignant score
+## Cluster2 = downregulated/non-malignant score
+integrate <- subset(integrate, annote_1 == 'plasma' & (Sdc1 > 0 | Xbp1 > 0 | Prdm1 > 0))
+integrate <- AddModuleScore(integrate, features = list(up = c(fig_up_genes,'hMYC'), down = fig_down_genes), assay = 'RNA')
+
+# save module scores
+x <- FetchData(integrate, vars = c('sample_name','annote_1','Cluster1','Cluster2')) %>% filter(annote_1 == 'plasma')
+x$clone <- clone_df$clone[match(rownames(x), rownames(clone_df))]
+x <- x[,c(1,5,3,4)]
+x <- x %>% rownames_to_column('cell')
+colnames(x)[c(4,5)] <- c('up_score','down_score')
+
+write_csv(x, 'c3d_mgdmb_plasma_module_scores_table.csv')
+
+# find the top % of malignant and non-malignant cells
+## malignant = top 20% upregulated and bottom 20% downregulated
+## non-malignant = bottom 20% upregulated and top 20% downregulated
+up_df <- data.frame()
+down_df <- data.frame()
+
+samples <- unique(integrate$sample_name)
+
+x <- FetchData(integrate, vars = c('sample_name','annote_1','Cluster1','Cluster2')) %>% filter(annote_1 == 'plasma')
+
+for (i in samples) {
+  
+  x1 <- x %>% filter(sample_name == i) 
+  
+  up_q <- quantile(x1$Cluster1, seq(0,1,.10))
+  down_q <- quantile(x1$Cluster2, seq(0,1,.10))
+  
+  up_df <- rbind(up_df, x1[x1$Cluster1 > up_q[9] & x1$Cluster2 <= down_q[3],])
+  down_df <- rbind(down_df, x1[x1$Cluster1 <= up_q[3] & x1$Cluster2 > down_q[9],])
+  
+}
+
+```
+
+```{r}
+# FIGURE 3A: heatmap
+DefaultAssay(integrate) <- 'integrated'
+x <- FetchData(integrate, vars = c('sample_name','treatment','hMYC',fig_up_genes,fig_down_genes), cells = c(rownames(up_df), rownames(down_df)))
+x$group <- c(rep('up',nrow(up_df)), rep('down',nrow(down_df)))
+
+express <- x[,colnames(x)[colnames(x) %in% c('hMYC',fig_up_genes,fig_down_genes)]]
+
+metadata <- x[,c('sample_name','treatment','group')]
+metadata$group <- ifelse(metadata$group == 'up', yes = 'Malignant', no = 'Normal')
+metadata$group <- factor(metadata$group, levels = c('Normal','Malignant'))
+metadata$treatment <- factor(metadata$treatment, levels = c('IT PBS', 'IT C3d'))
+metadata <- metadata %>% arrange(group, treatment, sample_name)
+colnames(metadata) <- c('Sample', 'Treatment', 'Type')
+
+express <- express[rownames(metadata),]
+
+express_scaled <- apply(express, 2, function(i) scales::rescale(i, to = c(0,1)))
+
+colors <- colorRampPalette(c('black','yellow'))(100)
+anno_colors <- list(Type = c(Normal = '#01e3c5', Malignant = '#ff81bd'),
+                    Treatment = c('IT PBS' = '#ff9e37', 'IT C3d' = '#00d78d'))
+
+p <- pheatmap(t(express_scaled), cluster_rows = F, cluster_cols = F, show_colnames = F, annotation_col = metadata, show_rownames = F, gaps_row = 165, gaps_col = c(169,560,677), annotation_colors = anno_colors, fontsize = 13)
+
+tiff('final_figures/c3d_mgdmb_plasma_modulescore_heatmap.tiff', width = 700, height = 800)
+print(p)
+dev.off()
+
+```
+
+# Granulocytes Analysis
+```{r}
+# DE analysis
+ob <- subset(integrate, annote_1 %in% c('granulocyte'))
+Idents(ob) <- 'integrate_clusters'
+
+clusters <- as.character(levels(ob))
+
+de_clusters <- data.frame()
+for (i in clusters) {
+  x <- FindMarkers(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes, subset.ident = i, test = 'LR', latent.vars = 'run_id') %>% rownames_to_column('gene') %>% mutate(cluster = i)
+  de_clusters <- rbind(de_clusters, x)
+}
+
+write_csv(de_clusters, 'c3d_mgdmb_granulocytes_de_clusters_all.csv')
+write_csv(de_clusters %>% filter(p_val_adj < .05), 'c3d_mgdmb_granulocytes_de_clusters_filt.csv')
+
+```
