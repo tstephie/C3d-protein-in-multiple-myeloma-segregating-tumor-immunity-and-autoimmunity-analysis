@@ -740,6 +740,9 @@ for (i in samples) {
   
 }
 
+write_csv(up_df, file = 'c3d_mgdmb_plasma_module_scores_upreg_table.csv')
+write_csv(down_df, file = 'c3d_mgdmb_plasma_module_scores_downreg_table.csv')
+
 ```
 
 ```{r}
