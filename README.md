@@ -1,4 +1,4 @@
-# C3d protein in mutliple myeloma
+# C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity Analysis
 Code and other plots from scRNA-seq analysis for the "C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity" article
 
 The analysis was done in two parts:
