@@ -80,9 +80,6 @@ The metadata file can be found in the ***tables_and_objects*** folder. The count
 ### QC
 Filtering thresholds can be found at lines 155-222. Violin and scatter QC plots can be found in the ***plots/qc*** folder for before and after the filtering step.
 
-### Unbatched Analysis 
-We first ran through the standard processing pipeline to check for batch effect. We also checked for cell cycle batch effect at lines 331-346. You will need the ***mouse_cell_cycle_genes.rds*** file, which contains mouse cell cycle genes, to check for cell cycle batch effect. You can find the PCA and other QC plots in the ***plots/qc*** folder and the UMAP plots in the ***plot/umap*** folder with “_unbatch” in the file name. 
-
 ### Integration Analysis
 We then ran through the integration pipeline since we found batch effect from the “run_id”, which indicates that the samples were sequenced at different times. You can find the PCA and other QC plots in the ***plots/qc*** folder and the UMAP plots in the ***plot/umap*** folder with “_integrated” or “_integrate” in the file name. 
 
