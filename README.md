@@ -1,11 +1,14 @@
 # C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity Analysis
 Code and other plots from scRNA-seq and bulk RNA-seq analysis for the "C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity" article
 
+## scRNA-seq Analysis
 The scRNA-seq analysis was done in two part:
 	CellRanger: Pre-processing of FASTQ to counts
 	Seurat: Processing of counts to downstream analyses shown in the article
 
-## CellRanger
+ The code for the analysis can be found here: mgdmb_c3d_scrnaseq_analysis_final.Rmd
+
+### CellRanger
 
 We used the human MYC transgene in our mice model, so we had to create a custom genome reference to align the reads and create counts. We used GRCm38 as mouse reference and added the human MYC gene (ENSG00000136997) from GRCh38. The steps for this process is below (files will be named differently for own analysis):
 
@@ -64,11 +67,11 @@ cellranger mkref --genome=new_genome --fasta=new_genome.fa --genes=new_genes.gtf
 11. Then we aligned the FASTQ files with this indexed reference in CellRanger. You can refer to the CellRanger manual for more information here:
 (https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/using/tutorial_ct)
 
-## Seurat 
+### Seurat 
 
 R code can be found in the “mgdmb_c3d_scrnaseq_analysis_final.Rmd” file
 
-### Input
+#### Input
 The input files for this part are:
 - Multiple_Myeloma_10X_mice_list_v3.xlsx = contain metadata for samples in dataset
 - {*}_filtered_feature_bc_matrix.h5 = contains filtered count matrix from CellRanger; should have one for every sample
@@ -76,19 +79,15 @@ The input files for this part are:
 
 The metadata file can be found in the ***tables_and_objects*** folder. The count matrices and contigs can be found in GEO. 
 
-### QC
-Filtering thresholds can be found at lines 155-222. Violin and scatter QC plots can be found in the ***plots/qc*** folder for before and after the filtering step.
+#### QC
+Violin and scatter QC plots can be found in the ***plots/qc*** folder for before and after the filtering step.
 
-### Integration Analysis
-We then ran through the integration pipeline since we found batch effect from the “run_id”, which indicates that the samples were sequenced at different times. You can find the PCA and other QC plots in the ***plots/qc*** folder and the UMAP plots in the ***plot/umap*** folder with “_integrated” or “_integrate” in the file name. 
+#### Integration Analysis
+We then ran the samples through Seurat's integration pipeline since we found batch effect from the “run_id”, which indicates that the samples were sequenced at different times. You can find the PCA and other QC plots in the ***plots/qc*** folder and the UMAP plots in the ***plot/umap*** folder. 
 
-### Plasma Cell Analysis
+#### Plasma Cell Analysis
 You can find the DE genes from a previous study in the ***gene_expression_in_MM_fig2a_data.xlsx*** file in the ***tables_and_objects*** folder. 
 
-### Code for Figures Found in Article
+## Bulk RNA-seq Analysis
 
-You can find the code for the figures in the article at:
-- Figure 3A = lines 747-772
-- Figure S3A = lines 628-632
-- Figure S3B = lines 636-640
-- Figure S3C = lines 647-653
+The code for the analysis can be found here: mgdmb_c3d_bulk_rnaseq_analysis_final.Rmd
