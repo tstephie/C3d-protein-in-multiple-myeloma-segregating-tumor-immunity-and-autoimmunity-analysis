@@ -1,4 +1,4 @@
-# C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity Analysis
+# Complement C3d enables cell-mediated immunity capable of distinguishing spontaneously transformed from non-transformed cells Analysis
 Code and other plots from scRNA-seq and bulk RNA-seq analysis for the "C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity" article
 
 ## scRNA-seq Analysis
