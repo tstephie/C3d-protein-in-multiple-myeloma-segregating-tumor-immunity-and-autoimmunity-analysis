@@ -1,0 +1,179 @@
+---
+title: "MGDMB C3D bulk RNA-seq Analysis"
+author: "Stephanie The"
+date: "2023-11-16"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages
+```{r}
+library(tidyverse)
+library(edgeR)
+library(clusterProfiler)
+library(msigdbr)
+library(ReactomePA)
+library(org.Mm.eg.db)
+library(RColorBrewer)
+library(patchwork)
+library(cowplot)
+
+```
+
+# Analysis
+```{r}
+counts <- read.delim("8876-JC_rna_bulk/gene_expected_count.annot.txt")
+metadata <- data.frame(condition = c('ctrl_0', 'ctrl_16', 'c3d_24','c3d_24','ctrl_24',
+                                     'ctrl_0', 'c3d_6', 'c3d_6', 'ctrl_6', 'ctrl_6',
+                                     'c3d_16', 'c3d_16','ctrl_16'),
+                       row.names = colnames(counts)[5:17])
+genes <- counts[,1:3]
+
+metadata <- metadata %>% filter(condition %in% c('ctrl_0','ctrl_24','c3d_24'))
+metadata$condition <- factor(metadata$condition, levels = c('ctrl_0','ctrl_24','c3d_24'))
+counts <- counts[,-c(1:3)]
+counts <- counts[,rownames(metadata)]
+rownames(counts) <- genes$gene_id
+
+gene_count <- DGEList(counts = counts, genes = genes, group = metadata$condition)
+
+#Filtering Step
+filtered_genes <- filterByExpr(gene_count)
+gene_count <- gene_count[filtered_genes,keep.lib.sizes=FALSE]
+
+#Normalization
+gene_count <- calcNormFactors(gene_count)
+
+#Estimate Dispersions
+gene_count <- estimateDisp(gene_count)
+
+# DE test
+## ctrl 24hr vs. ctrl 0hr
+de <- exactTest(gene_count, pair=c("ctrl_0","ctrl_24"))
+de_df <- as.data.frame(topTags(de, n = Inf))
+de_df1 <- de_df %>% group_by(external_gene_name) %>% top_n(1, wt = abs(logFC)) %>% ungroup()
+de_df1 <- de_df1[,-c(1:2)]
+# write_csv(de_df1, '8876-JC_rna_bulk/c3d_mgdmb_8876_JC_ctrl_24_vs_ctrl_0_de.csv')
+
+df <- de_df1 %>% mutate(label = case_when(FDR < .05 & logFC >= 2 ~ '1',
+                                  FDR < .05 & logFC <= -2 ~ '-1',
+                                  TRUE ~ '0'))
+p <- df %>% ggplot(aes(logFC, -log10(FDR), color = label)) + geom_point() + 
+  scale_color_manual(values = c('1' = 'red', '-1' = 'blue', '0' = 'grey'), labels = c('1' = 'upregulated', '-1' = 'downregulated', '0' = 'unchanged')) +
+  theme_bw() + labs(title = 'C3d 24hr vs. Ctrl 0hr', color = '') 
+
+png('8876-JC_rna_bulk/c3d_mgdmb_8876_JC_ctrl_24_vs_ctrl_0_de_volcano_plot.png', width = 500, height = 500)
+print(p)
+dev.off()
+
+## c3d 24hr vs. ctrl 0hr
+de <- exactTest(gene_count, pair=c("ctrl_0","c3d_24"))
+de_df <- as.data.frame(topTags(de, n = Inf))
+de_df1 <- de_df %>% group_by(external_gene_name) %>% top_n(1, wt = abs(logFC)) %>% ungroup()
+de_df1 <- de_df1[,-c(1:2)]
+# write_csv(de_df1, '8876-JC_rna_bulk/c3d_mgdmb_8876_JC_c3d_24_vs_ctrl_0_de.csv')
+
+df <- de_df1 %>% mutate(label = case_when(FDR < .05 & logFC >= .5 ~ '1',
+                                  FDR < .05 & logFC <= -.5 ~ '-1',
+                                  TRUE ~ '0'))
+p <- df %>% ggplot(aes(logFC, -log10(FDR), color = label)) + geom_point() + 
+  scale_color_manual(values = c('1' = 'red', '-1' = 'blue', '0' = 'grey'), labels = c('1' = 'upregulated', '-1' = 'downregulated', '0' = 'unchanged')) +
+  theme_bw() + labs(title = 'C3d 24hr vs. Ctrl 0hr', color = '') 
+
+png('8876-JC_rna_bulk/c3d_mgdmb_8876_JC_c3d_24_vs_ctrl_0_de_volcano_plot.png', width = 500, height = 500)
+print(p)
+dev.off()
+
+## c3d 24hr vs. ctrl 24hr
+de <- exactTest(gene_count, pair=c("ctrl_24","c3d_24"))
+de_df <- as.data.frame(topTags(de, n = Inf))
+de_df1 <- de_df %>% group_by(external_gene_name) %>% top_n(1, wt = abs(logFC)) %>% ungroup()
+de_df1 <- de_df1[,-c(1:2)]
+# write_csv(de_df1, '8876-JC_rna_bulk/c3d_mgdmb_8876_JC_c3d_24_vs_ctrl_24_de.csv')
+
+df <- de_df1 %>% mutate(label = case_when(FDR < .05 & logFC >= 2 ~ '1',
+                                  FDR < .05 & logFC <= -2 ~ '-1',
+                                  TRUE ~ '0'))
+p <- df %>% ggplot(aes(logFC, -log10(FDR), color = label)) + geom_point() + 
+  scale_color_manual(values = c('1' = 'red', '-1' = 'blue', '0' = 'grey'), labels = c('1' = 'upregulated', '-1' = 'downregulated', '0' = 'unchanged')) +
+  theme_bw() + labs(title = 'C3d 24hr vs. Ctrl 24hr', color = '') 
+
+png('8876-JC_rna_bulk/c3d_mgdmb_8876_JC_c3d_24_vs_ctrl_24_de_volcano_plot.png', width = 500, height = 500)
+print(p)
+dev.off()
+
+```
+
+# Pathway Analysis
+```{r}
+# pathways
+## ctrl 24hr vs. ctrl 0hr
+de <- read_csv('8876-JC_rna_bulk/c3d_mgdmb_8876_JC_ctrl_24_vs_ctrl_0_de.csv')
+de <- de[!grepl('^Ig', de$external_gene_name),]
+
+de1 <- de %>% filter(FDR < .05)
+
+bitr_df <- bitr(de$external_gene_name, fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% de$external_gene_name & !is.na(bitr_df$ENTREZID),]
+
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% de$external_gene_name,]
+de <- de[de$external_gene_name %in% bitr_df$SYMBOL,]
+de$ENTREZID <- bitr_df$ENTREZID[match(de$external_gene_name,bitr_df$SYMBOL)]
+
+gene_list <- de %>% arrange(-logFC) %>% dplyr::select(ENTREZID,logFC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$external_gene_name]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_bulk_rna_gsea_go_ob_ctrl_24_vs_ctrl_0.rds')
+# write_csv(gsea@result, 'c3d_mgdmb_bulk_rna_gsea_go_ctrl_24_vs_ctrl_0.rds')
+
+## c3d 24hr vs. ctrl 24hr
+de <- read_csv('8876-JC_rna_bulk/c3d_mgdmb_8876_JC_c3d_24_vs_ctrl_24_de.csv')
+de <- de[!grepl('^Ig', de$external_gene_name),]
+
+de1 <- de %>% filter(FDR < .05)
+
+bitr_df <- bitr(de$external_gene_name, fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% de$external_gene_name & !is.na(bitr_df$ENTREZID),]
+
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% de$external_gene_name,]
+de <- de[de$external_gene_name %in% bitr_df$SYMBOL,]
+de$ENTREZID <- bitr_df$ENTREZID[match(de$external_gene_name,bitr_df$SYMBOL)]
+
+gene_list <- de %>% arrange(-logFC) %>% dplyr::select(ENTREZID,logFC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$external_gene_name]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_bulk_rna_gsea_go_ob_c3d_24_vs_ctrl_24.rds')
+# write_csv(gsea@result, 'c3d_mgdmb_bulk_rna_gsea_go_c3d_24_vs_ctrl_24.rds')
+
+```

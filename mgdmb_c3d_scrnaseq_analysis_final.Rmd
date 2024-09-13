@@ -3,6 +3,8 @@ title: "MGDMB C3D scRNA-seq Analysis"
 author: "Stephanie The"
 date: '2022-06-03'
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 # Packages
@@ -11,11 +13,18 @@ library(tidyverse)
 library(readxl)
 library(Seurat)
 library(pheatmap)
+library(clusterProfiler)
+library(msigdbr)
+library(ReactomePA)
+library(org.Mm.eg.db)
 library(RColorBrewer)
 library(patchwork)
 library(cowplot)
 library(grid)
 library(gridExtra)
+library(enrichplot)
+library(ggraph)
+library(igraph)
 
 ```
 
@@ -289,141 +298,7 @@ unlist(sapply(obs, function(x) ncol(x)))
 
 ```
 
-## Unbatched Analysis
-### Merge objects
-```{r}
-more_obs <- paste0("c(",paste(sapply(2:length(obs),function(i) paste0("obs[[",i,"]]")),collapse=",",sep=""),")")
-merged_ob <- merge(obs[[1]], eval(parse(text=more_obs)), add.cell.ids = metadata$sample_id)
-
-```
-
-### Normalization
-```{r}
-merged_ob <- NormalizeData(merged_ob)
-
-```
-
-### Find Variable Features
-
-```{r}
-merged_ob <- FindVariableFeatures(merged_ob)
-
-```
-
-```{r}
-# find variable features scatter plot
-top10_list <- head(VariableFeatures(merged_ob), 10)
-p1 <- VariableFeaturePlot(merged_ob)
-p2 <- LabelPoints(plot = p1, points = top10_list)
-
-png(filename = 'plots/qc/c3d_mgdmb_variablefeatures_unbatch.png', width = 800, height = 500)
-print(p1+p2)
-dev.off()
-
-```
-
-### Check Cell Cycle Batch
-
-We checked for cell cycle batch effects, but we decided not to correct for it.
-
-```{r}
-# mouse cc genes
-cc_genes <- readRDS("mouse_cell_cycle_genes.rds")
-
-# calculate scores
-merged_ob <- CellCycleScoring(merged_ob, s.features = cc_genes$s.genes, g2m.features = cc_genes$g2m.genes, set.ident = TRUE)
-
-# scale data on cc genes
-merged_ob <- ScaleData(merged_ob, features = c(cc_genes$s.genes, cc_genes$g2m.genes), verbose = F)
-
-# run PCA on cc genes
-merged_ob <- RunPCA(merged_ob, features = c(cc_genes$s.genes, cc_genes$g2m.genes), 
-                    nfeatures.print = 5, reduction.name = 'cc_pca', verbose = F, reduction.key = 'ccPCA_')
-
-# plot PCA of cc phases
-png(filename = "plots/qc/c3d_mgdmb_cc_pca_unbatch.png", width = 500, height = 500)
-print(DimPlot(merged_ob, reduction = 'cc_pca', group.by = c('Phase')))
-dev.off()
-
-```
-
-### Scaling
-```{r}
-merged_ob <- ScaleData(merged_ob, vars.to.regress = 'nCount_RNA') 
-
-```
-
-### PCA
-```{r}
-merged_ob <- RunPCA(merged_ob, features = VariableFeatures(merged_ob),  nfeatures.print = 5, reduction.name = 'pca_unbatch')
-
-```
-
-```{r fig.height=5, fig.width=5}
-# qualitative
-png(filename = "plots/qc/c3d_mgdmb_pca_elbowplot_unbatch.png", width = 500, height = 500)
-print(ElbowPlot(object = merged_ob, ndims = 50, reduction = 'pca_unbatch'))
-dev.off()
-
-```
-
-```{r}
-# quantitative
-pct <- merged_ob@reductions$unbatch_pca@stdev / sum(merged_ob@reductions$unbatch_pca@stdev) * 100 
-cum <- cumsum(pct) 
-co1 <- which(cum > 90 & pct < 5)[1] 
-co2 <- sort(which((pct[1:length(pct)-1] - pct[2:length(pct)]) > .1), decreasing = T)[1] + 1
-pcs <- min(co1, co2) # pcs
-
-```
-
-```{r}
-# PCA plot for to check for batch effect
-png(filename = "plots/qc/c3d_mgdmb_pca_unbatch_batch.png", width = 1000, height = 1000)
-print(DimPlot(merged_ob, reduction = 'pca_unbatch', group.by = c('run_id','gender','dob','treatment','cage_id'), ncol = 2))
-dev.off()
-
-```
-
-### Clustering
-```{r}
-merged_ob <- FindNeighbors(merged_ob, dims = 1:pcs, k.param = 20)
-merged_ob <- FindClusters(merged_ob)
-
-# look at how many clusters we get 
-head(Idents(merged_ob), 5)
-
-# store clusters in metadata slot
-merged_ob$unbatch_clusters <- Idents(merged_ob)
-
-```
-
-### UMAP
-```{r}
-merged_ob <- RunUMAP(merged_ob, dims = 1:pcs, reduction.name = 'umap_unbatch', reduction = 'pca_unbatch')
-
-png("plots/umap/c3d_mgdmb_umap_unbatch_clusters_no_labels.png", width = 600, height = 600)
-print(DimPlot(object = merged_ob, reduction = 'umap_unbatch', group.by = c('unbatch_clusters'), raster = F))
-dev.off()
-
-png("plots/umap/c3d_mgdmb_umap_unbatch_clusters_labels.png", width = 600, height = 600)
-print(DimPlot(object = merged_ob, reduction = 'umap_unbatch', group.by = c('unbatch_clusters'), label = T, raster = F))
-dev.off()
-
-png("plots/umap/c3d_mgdmb_umap_unbatch_clusters_run_id.png", width = 800, height = 600)
-print(DimPlot(object = merged_ob, reduction = 'umap_unbatch', group.by = c('unbatch_clusters', 'run_id'), raster = F))
-dev.off()
-
-```
-
-### Save Unbatch Object
-```{r}
-saveRDS(merged_ob, 'c3d_mgdmb_unbatch_ob.rds')
-
-```
-
-## Integration Analysis
-### Split Merged Object by Batch
+## Split Merged Object by Batch
 ```{r}
 merged_ob <- readRDS('c3d_mgdmb_unbatch_ob.rds')
 obs <- SplitObject(merged_ob, split.by = 'run_id')
@@ -433,7 +308,7 @@ gc()
 
 ```
 
-### Normalization & Variable Features
+## Normalization & Variable Features
 ```{r}
 for (i in 1:length(obs)) {
   obs[[i]] <- NormalizeData(obs[[i]], verbose = F)
@@ -442,7 +317,7 @@ for (i in 1:length(obs)) {
 
 ```
 
-### Integration
+## Integration
 ```{r}
 # find integration features/genes
 genes <- SelectIntegrationFeatures(obs)
@@ -463,13 +338,13 @@ DefaultAssay(integrate) <- 'integrated'
 
 ```
 
-### Scaling
+## Scaling
 ```{r}
 integrate <- ScaleData(integrate, vars.to.regress = c('nCount_RNA'), verbose = F)
 
 ```
 
-### PCA
+## PCA
 ```{r}
 integrate <- RunPCA(object = integrate, features = VariableFeatures(object = integrate), nfeatures.print = 5, reduction.name = 'pca_integrated', reduction.key = 'intPCA_', verbose = F)
 
@@ -501,7 +376,7 @@ dev.off()
 
 ```
 
-### Clustering
+## Clustering
 ```{r}
 integrate <- FindNeighbors(integrate, reduction = 'pca_integrated', dims = 1:pcs, k.param = 20, verbose = F)
 integrate <- FindClusters(integrate, resolution = 0.5, verbose = F)
@@ -514,7 +389,7 @@ integrate$integrate_clusters <- Idents(integrate)
 
 ```
 
-### UMAP
+## UMAP
 ```{r}
 integrate <- RunUMAP(integrate, dims = 1:pcs, reduction = 'pca_integrated', reduction.name = 'umap_integrated', reduction.key = 'intUMAP_', verbose = F)
 
@@ -530,9 +405,16 @@ png("plots/umap/c3d_mgdmb_umap_integrate_clusters_run_id.png", width = 800, heig
 print(DimPlot(object = integrate, reduction = 'umap_integrated', group.by = c('integrate_clusters', 'run_id'), raster = F))
 dev.off()
 
+# UMAP (annotated clusters; split by sample)
+p <- DimPlot(object = integrate, reduction = 'umap_integrated', group.by = 'annote_1', raster = F, split.by = 'sample_name', ncol = 4) + labs(title= '', x='UMAP1', y='UMAP2') + theme(legend.text = element_text(size = 12)) + guides(color = guide_legend(override.aes = list(size = 5))) + scale_color_manual(values = x1, labels = x)
+
+tiff("final_figures/c3d_mgdmb_umap_annote_1_split_sample_no_labels.tiff", width = 1000, height = 900)
+print(p)
+dev.off()
+
 ```
 
-### Save Integrated Object
+## Save Object
 ```{r}
 saveRDS(integrate, 'c3d_mgdmb_integrated_ob.rds')
 
@@ -544,7 +426,6 @@ saveRDS(integrate, 'c3d_mgdmb_integrated_ob.rds')
 integrate <- readRDS('c3d_mgdmb_integrated_ob.rds')
 
 de <- FindAllMarkers(integrate, assay = 'RNA')
-write_csv(de, 'tables/c3d_mgdmb_integrate_clusters_de_unbatch_all.csv')
 write_csv(de %>% filter(padj < .05), 'tables/c3d_mgdmb_integrate_clusters_de_unbatch_filt.csv')
 
 ```
@@ -552,8 +433,23 @@ write_csv(de %>% filter(padj < .05), 'tables/c3d_mgdmb_integrate_clusters_de_unb
 ```{r}
 # batch analysis
 de <- FindAllMarkers(integrate, assay = 'RNA', test.use = 'LR', latent.vars = 'run_id')
-write_csv(de, 'tables/c3d_mgdmb_integrate_clusters_de_batch_all.csv')
 write_csv(de %>% filter(padj < .05), 'tables/c3d_mgdmb_integrate_clusters_de_batch_filt.csv')
+
+```
+
+## Condition DE
+```{r}
+# DE of C3d vs. PBS 
+
+de <- data.frame()
+for (i in 0:23) {
+  temp <- FindMarkers(integrate, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes, test.use = 'LR', latent.vars = 'run_id', subset.ident = as.character(i)) %>% rownames_to_column('gene') %>% mutate(cluster = i)
+  temp$p_val_adj_bh <- p.adjust(temp$p_val, method = 'BH')
+  de <- rbind(de, temp)
+}
+
+# cluster 0 did not pass logfc threshold (< .25)
+# write_csv(de, 'c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
 
 ```
 
@@ -624,7 +520,6 @@ print(p)
 dev.off()
 
 # UMAP (annotated clusters; split by treatment)
-## FIGURE S3A
 p <- DimPlot(object = integrate, reduction = 'umap_integrated', group.by = 'annote_1', raster = F, split.by = 'treatment') + labs(title= '', x='UMAP1', y='UMAP2') + theme(legend.text = element_text(size = 12)) + guides(color = guide_legend(override.aes = list(size = 5))) + scale_color_manual(values = x1, labels = x)
 
 tiff("final_figures/c3d_mgdmb_umap_annote_1_split_treatment_no_labels.tiff", width = 1000, height = 550)
@@ -632,7 +527,6 @@ print(p)
 dev.off()
 
 # UMAP (annotated clusters; split by sample)
-## FIGURE S3B
 p <- DimPlot(object = integrate, reduction = 'umap_integrated', group.by = 'annote_1', raster = F, split.by = 'sample_name', ncol = 4) + labs(title= '', x='UMAP1', y='UMAP2') + theme(legend.text = element_text(size = 12)) + guides(color = guide_legend(override.aes = list(size = 5))) + scale_color_manual(values = x1, labels = x)
 
 tiff("final_figures/c3d_mgdmb_umap_annote_1_split_sample_no_labels.tiff", width = 1000, height = 900)
@@ -643,7 +537,6 @@ dev.off()
 
 ```{r}
 # Refined cluster gene marker dot plot
-## FIGURE S3C
 genes <- c('Cdk6', 'Kit', 'Adgrg1', 'Col1a1', 'Col1a2', 'Loxl1', 'Lum', 'Hba-a1', 'Hba-a2', 'Pf4', 'Itga2b', 'Gp1ba', 'Tubb1', 'Ppbp', 'Ptprc', 'Cd3d', 'Cd3e', 'Cd4', 'Foxp3', 'Cd8a', 'Nkg7', 'Klrg1', 'Gzma', 'Cd79a', 'Cd19', 'Ms4a1', 'Sdc1', 'Xbp1', 'Ccr10', 'Prdm1', 'Ly6c2', 'Itgam', 'S100a8','S100a9','Cd33','Ly6g', 'Prss34','Mcpt8', 'Cd68','Adgre1','Cd14','Mrc1', 'Ccr2', 'Siglech','Irf8')
 
 p <- DotPlot(integrate, group.by = 'annote_1', features = genes) + RotatedAxis() + labs(x = 'Gene Makers', y = '') + scale_y_discrete(labels = c('pDC', 'Monocytes/Macrophages', 'Granulocytes', 'Plasma Cells', 'B Cells', 'T/NK Cells', 'Platelets','Erythroid Cells', 'Fibroblasts', 'HSC'))
@@ -654,10 +547,65 @@ dev.off()
 
 ```
 
-
 ```{r}
 # save annotated object
 saveRDS(integrate, 'c3d_mgdmb_integrated_ob_annote_1.rds')
+
+```
+
+### Cell Type DE Heatmap
+```{r}
+# DE plot 
+# all significant genes for all clusters
+# group by cell types
+
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de <- de %>% filter(p_val_adj_bh < .05) %>% 
+  mutate(celltype = integrate$annote_1[match(cluster, integrate$integrate_clusters)]) %>%
+  filter(!celltype %in% c('erythroid','HSC','platelet','fibroblast'))
+
+de1 <- de %>% dplyr::select(gene, celltype) %>% unique()
+x <- as.data.frame(table(de1$gene))
+x1 <- as.character(x$Var1[x$Freq >= 3])
+
+df <- FetchData(integrate, vars = c(x1, 'annote_1', 'treatment')) %>% 
+  filter(!annote_1 %in% c('erythroid','HSC','platelet','fibroblast')) %>%
+  mutate(annote_1 = factor(annote_1))
+
+mean.fxn <- function(x) {
+    return(log(x = rowMeans(x = expm1(x = x)) + 1, 
+      base = 2))
+}
+
+ident1 <- 'IT C3d'
+ident2 <- 'IT PBS'
+
+fc <- data.frame()
+for (i in levels(df$annote_1)) {
+  cells1 <- colnames(integrate)[integrate$annote_1 == i & integrate$treatment == ident1]
+  cells2 <- colnames(integrate)[integrate$annote_1 == i & integrate$treatment == ident2]
+  
+  mean1 <- mean.fxn(integrate@assays$RNA@data[x1,cells1])
+  mean2 <- mean.fxn(integrate@assays$RNA@data[x1,cells2])
+  
+  fc <- rbind(fc, 
+              data.frame(gene = x1,
+                 avg_log2FC = mean1 - mean2,
+                 celltype = i,
+                 row.names = NULL))
+  
+}
+
+df <- fc %>% reshape2::dcast(celltype ~ gene, value.var = 'avg_log2FC') %>% column_to_rownames('celltype')
+
+df_scaled <- apply(df, 2, function(i) scales::rescale(i, c(-1,1)))
+
+breaks <- seq(-.5, .5, length.out = 100)
+p <- pheatmap(t(df), cluster_rows = T, cluster_cols = T, breaks = breaks)
+
+png('c3d_mgdmb_all_celltypes_de_heatmap.png', width = 700, height = 700)
+print(p)
+dev.off()
 
 ```
 
@@ -688,6 +636,19 @@ write_csv(df, 'c3d_mgdmb_plasma_total_cells_freq_table.csv')
 # genes from paper
 fig_up_genes <- read_excel('gene_expression_in_MM_fig2a_data.xlsx', sheet = 1) %>% deframe()
 fig_down_genes <- read_excel('gene_expression_in_MM_fig2a_data.xlsx', sheet = 2) %>% deframe()
+
+```
+
+```{r}
+# hMYC expression
+x <- WhichCells(integrate, expression = raw_clonotype_id != 'None')
+
+p1 <- FeaturePlot(integrate, features = 'hMYC', reduction = 'umap_integrated')
+p2 <- DimPlot(integrate, cells.highlight = x, reduction = 'umap_integrated', sizes.highlight = .5)
+
+png("plots/express/c3d_mgdmb_umap_hMYC_clones.png", width = 1200, height = 600)
+print(p1 | p2)
+dev.off()
 
 ```
 
@@ -746,7 +707,7 @@ write_csv(down_df, file = 'c3d_mgdmb_plasma_module_scores_downreg_table.csv')
 ```
 
 ```{r}
-# FIGURE 3A: heatmap
+# heatmap
 DefaultAssay(integrate) <- 'integrated'
 x <- FetchData(integrate, vars = c('sample_name','treatment','hMYC',fig_up_genes,fig_down_genes), cells = c(rownames(up_df), rownames(down_df)))
 x$group <- c(rep('up',nrow(up_df)), rep('down',nrow(down_df)))
@@ -776,21 +737,1266 @@ dev.off()
 
 ```
 
-# Granulocytes Analysis
+## Malignant PCA
 ```{r}
-# DE analysis
-ob <- subset(integrate, annote_1 %in% c('granulocyte'))
-Idents(ob) <- 'integrate_clusters'
+express <- FetchData(ob, vars = c(fig_up_genes,fig_down_genes), slot = 'data', cells = rownames(clone_df))
+express <- express[,colSums(express) > 0]
+metadata <- clone_df[rownames(express),]
 
-clusters <- as.character(levels(ob))
+clone_freq <- as.data.frame(table(metadata$sample_clone))
 
-de_clusters <- data.frame()
-for (i in clusters) {
-  x <- FindMarkers(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes, subset.ident = i, test = 'LR', latent.vars = 'run_id') %>% rownames_to_column('gene') %>% mutate(cluster = i)
-  de_clusters <- rbind(de_clusters, x)
+pca <- prcomp(express, center = T, scale. = T)
+# write_csv(as.data.frame(pca$rotation) %>% rownames_to_column('gene'), file = 'c3d_mgdmb_pca_variable_importance_table.csv')
+# write_csv(as.data.frame(pca$x) %>% rownames_to_column('cell'), file = 'c3d_mgdmb_pca_coordinates_table.csv')
+
+df <- data.frame(pca$x[,1:2], sample_clone = metadata$sample_clone)
+p1 <- df %>% ggplot(aes(PC1, PC2)) + geom_point() + theme_bw() + theme(legend.position = 'none')
+
+df1 <- df %>% group_by(sample_clone) %>% summarize_all(mean)
+df1$freq <- clone_freq$Freq[match(df1$sample_clone, clone_freq$Var1)]
+p2 <- df1 %>% ggplot(aes(PC1, PC2, color = sample_clone, size = freq)) + geom_point() + theme_bw() + theme(legend.position = 'none')
+
+p1 + p2
+
+# pca split by sample
+df <- data.frame(pca$x[,1:2], sample = metadata$sample_name)
+colors <- scales::hue_pal()(length(unique(df$sample)))
+p1 <- df %>% ggplot(aes(PC1, PC2, color = sample)) + geom_point() + theme_bw()
+plots <- list()
+for (i in 1:length(colors)) {
+  sample <- unique(df$sample)[i]
+  df1 <- df[df$sample == sample,]
+  p <- df1 %>% ggplot(aes(PC1, PC2)) + geom_point(color = colors[i]) + labs(title = sample) + 
+    scale_x_continuous(limits = range(df$PC1)) + scale_y_continuous(limits = range(df$PC2)) + theme_bw()
+  plots <- c(plots, list(p))
+}
+plots <- c(list(p1),plots)
+
+wrap_plots(plots, ncol = 3, nrow = 4)
+
+df <- data.frame(pca$x[,1:2], sample = metadata$sample_name)
+
+df %>% ggplot(aes(PC1, fill = sample)) + geom_histogram(alpha = .5, position = 'identity', bins = 80) + facet_grid(sample ~ .) + theme_bw()
+df %>% ggplot(aes(PC2, fill = sample)) + geom_histogram(alpha = .5, position = 'identity', bins = 80) + facet_grid(sample ~ .) + theme_bw()
+
+
+# compute total variance
+variance <- pca$sdev^2 / sum(pca$sdev^2)
+
+qplot(c(1:length(variance)), variance) + geom_line() + geom_point(size=1)+ xlab("Principal Component") + ylab("Variance Explained") +
+  ggtitle("Scree Plot") + theme_classic()
+
+df <- data.frame(pca$rotation[,1,drop=F])
+df$fig_direct <- ifelse(rownames(df) %in% fig_up_genes, yes = 'mal', no = 'non-mal')
+gene_list <- rownames(df)[abs(df$PC1) >= .1]
+gene_list <- gene_list[!gene_list %in% c('Ndufa1','Prdx4','Rexo2','Rpl14','Sel1l')]
+sum(gene_list %in% fig_up_genes)
+sum(gene_list %in% fig_down_genes)
+
+```
+
+```{r}
+express <- FetchData(ob, vars = gene_list, cells = rownames(clone_df))
+express <- express[,colSums(express) > 0]
+
+#write_csv(express %>% rownames_to_column('cell'), 'c3d_mgdmb_pca_gene_list_expression_final.csv')
+
+metadata <- clone_df[rownames(express),]
+
+clone_freq <- as.data.frame(table(metadata$sample_clone))
+
+pca <- prcomp(express, center = T, scale. = T)
+
+df <- data.frame(pca$x[,1:2], sample = metadata$sample_name, clone = metadata$clone, sample_clone = metadata$sample_clone)
+p1 <- df %>% ggplot(aes(PC1, PC2)) + geom_point() + theme_bw() + theme(legend.position = 'none')
+# write_csv(df %>% rownames_to_column('cell'), file = 'c3d_mgdmb_pca_table.csv')
+
+df1 <- df %>% select(PC1,PC2,sample_clone) %>% group_by(sample_clone) %>% summarize_all(mean)
+df1$freq <- clone_freq$Freq[match(df1$sample_clone, clone_freq$Var1)]
+p2 <- df1 %>% ggplot(aes(PC1, PC2, color = sample_clone, size = freq)) + geom_point() + theme_bw() + theme(legend.position = 'none')
+# write_csv(df1, file = 'c3d_mgdmb_pca_clone_freq_mean_table.csv')
+
+png('c3d_mgdmb_plasma_pca_scatter_plot.png', width = 1000, height = 500)
+print(p1 + p2)
+dev.off()
+
+df <- data.frame(pca$x[,1:2], sample = metadata$sample_name)
+colors <- scales::hue_pal()(length(unique(df$sample)))
+p1 <- df %>% ggplot(aes(PC1, PC2, color = sample)) + geom_point() + theme_bw()
+plots <- list()
+for (i in 1:length(colors)) {
+  sample <- unique(df$sample)[i]
+  df1 <- df[df$sample == sample,]
+  p <- df1 %>% ggplot(aes(PC1, PC2)) + geom_point(color = colors[i]) + labs(title = sample) + 
+    scale_x_continuous(limits = range(df$PC1)) + scale_y_continuous(limits = range(df$PC2)) + theme_bw()
+  plots <- c(plots, list(p))
+}
+plots <- c(list(p1),plots)
+
+png('c3d_mgdmb_plasma_pca_scatter_sample_split_plot.png', width = 1200, height = 1200)
+print(wrap_plots(plots, ncol = 3, nrow = 4))
+dev.off()
+
+df <- data.frame(pca$x[,1:2], sample = metadata$sample_name)
+
+p <- df %>% ggplot(aes(PC1, fill = sample)) + geom_histogram(alpha = .5, position = 'identity', bins = 80) + facet_grid(sample ~ .) + theme_bw()
+png('c3d_mgdmb_plasma_pca_PC1_sample_split_histogram.png', width = 900, height = 900)
+print(p)
+dev.off()
+
+p <- df %>% ggplot(aes(PC2, fill = sample)) + geom_histogram(alpha = .5, position = 'identity', bins = 80) + facet_grid(sample ~ .) + theme_bw()
+png('c3d_mgdmb_plasma_pca_PC2_sample_split_histogram.png', width = 900, height = 900)
+print(p)
+dev.off()
+
+df1 <- cbind(df, express)
+
+plots <- list()
+for (i in gene_list) {
+  p <- df1 %>% ggplot(aes_string('PC1', 'PC2', color = i)) + geom_point() + scale_color_continuous(type = 'viridis')
+  plots <- c(plots, list(p))
+
 }
 
-write_csv(de_clusters, 'c3d_mgdmb_granulocytes_de_clusters_all.csv')
-write_csv(de_clusters %>% filter(p_val_adj < .05), 'c3d_mgdmb_granulocytes_de_clusters_filt.csv')
+p <- wrap_plots(plots, ncol = 4, nrow = 5)
+
+png('c3d_mgdmb_plasma_pca_split_gene_scatter_plot.png', width = 1500, height = 1500)
+print(p)
+dev.off()
+
+```
+
+# Pathway enrichment map
+## Plasma
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 10)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 10 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_plasma_cluster10_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_plasma_cluster10_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_plasma_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_plasma_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+## B
+### Cluster 3
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 3)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 3 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_bcells_cluster3_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_bcells_cluster3_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_bcells_cluster3_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_bcells_cluster3_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+### Cluster 4
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 4)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 4 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_bcells_cluster4_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_bcells_cluster4_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_bcells_cluster4_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_bcells_cluster4_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+## Monocytes/macrophages
+### Cluster 5
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 5)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 5 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_monocyte_cluster5_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_monocyte_cluster5_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_monocyte_cluster5_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_monocyte_cluster5_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+### Cluster 8
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 8)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 8 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_monocyte_cluster8_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_monocyte_cluster8_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+x <- nodes[!nodes$name %in% unique(c(edges$from, edges$to)),]
+nodes <- nodes[!nodes$name %in% x$name[x$size == 0],]
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_monocyte_cluster8_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_monocyte_cluster8_gsea_go_enrichmap_label.png', width = 2000, height = 2000)
+print(p)
+dev.off()
+
+```
+
+## Granulocyte
+### Cluster 0
+didn't do because no significant DE genes
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 0)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 0 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_granulocyte_cluster0_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_granulocyte_cluster0_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_granulocyte_cluster0_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_granulocyte_cluster0_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+### Cluster 1
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 1)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 1 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_granulocyte_cluster1_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_granulocyte_cluster1_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_granulocyte_cluster1_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_granulocyte_cluster1_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+### Cluster 2
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 2)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 2 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_granulocyte_cluster2_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_granulocyte_cluster2_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_granulocyte_cluster2_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_granulocyte_cluster2_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+## Erythroid
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 12)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 12 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_erythroid_cluster12_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 300)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 300)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_erythroid_cluster12_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_erythroid_cluster12_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_erythroid_cluster12_gsea_go_enrichmap_label.png', width = 2000, height = 2000)
+print(p)
+dev.off()
+
+```
+
+## pDCs
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 15)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 15 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_pDCs_cluster15_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 200)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 200)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_pDCs_cluster15_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_pDCs_cluster15_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_pDCs_cluster15_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+## T
+```{r}
+# GSEA
+ob <- subset(integrate, idents = 9)
+de <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_de.csv')
+de1 <- de %>% filter(cluster == 9 & p_val_adj_bh < .05)
+
+bitr_df <- bitr(rownames(ob), fromType = 'SYMBOL', toType = 'ENTREZID', OrgDb = org.Mm.eg.db)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% genes & !is.na(bitr_df$ENTREZID),]
+
+fc <- FoldChange(ob, ident.1 = 'IT C3d', ident.2 = 'IT PBS', group.by = 'treatment', features = genes)
+fc <- fc %>% rownames_to_column('gene') %>% filter(abs(avg_log2FC) > 0)
+bitr_df <- bitr_df[bitr_df$SYMBOL %in% fc$gene,]
+fc <- fc[fc$gene %in% bitr_df$SYMBOL,]
+fc$ENTREZID <- bitr_df$ENTREZID[match(fc$gene,bitr_df$SYMBOL)]
+
+gene_list <- fc %>% arrange(-avg_log2FC) %>% dplyr::select(ENTREZID,avg_log2FC) %>% tibble::deframe()
+
+gsea <- gseGO(gene_list, ont = 'BP', OrgDb = org.Mm.eg.db, pvalueCutoff = 1, pAdjustMethod = 'BH')
+
+gsea@result$core_enrichment <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]]
+  y <- bitr_df$SYMBOL[match(y,bitr_df$ENTREZID)]
+  paste(y, collapse = '/')
+})
+gsea@result$sig_genes <- sapply(gsea@result$core_enrichment, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  y <- y[y %in% de1$gene]
+  paste(y, collapse = '/')
+})
+gsea@result$n_sig_genes <- sapply(gsea@result$sig_genes, function(j) {
+  y <- strsplit(j,'/')[[1]] 
+  length(y)
+})
+#saveRDS(gsea, 'c3d_mgdmb_tcells_cluster9_gsea_go_ob.rds')
+
+# pathway enrichment map
+gsea1 <- gsea %>% filter(p.adjust < .05 & n_sig_genes > 0)
+gsea1 <- pairwise_termsim(gsea1, showCategory = 300)
+set.seed(123)
+p <- emapplot(gsea1, color = 'p.adjust', showCategory = 300)
+
+nodes <- as_data_frame(p$plot_env$g, what = 'vertices')
+nodes <- cbind(nodes, p$data[,1:2])
+nodes$size <- gsea1@result$n_sig_genes
+nodes$color <- gsea1@result$NES
+nodes$node_id <- as.character(c(1:nrow(nodes)))
+# write_csv(nodes, 'c3d_mgdmb_tcells_cluster9_gsea_go_enrich_nodes.csv')
+
+edges <- as_data_frame(p$plot_env$g, what = 'edges')
+edges <- cbind(edges, data.frame(matrix(0, nrow = nrow(edges), ncol = 4)))
+colnames(edges)[6:9] <- c('x','xend','y','yend')
+for (i in 1:nrow(edges)) {
+  edges$x[i] <- nodes$x[nodes$name == edges$from[i]]
+  edges$y[i] <- nodes$y[nodes$name == edges$from[i]]
+  
+  edges$xend[i] <- nodes$x[nodes$name == edges$to[i]]
+  edges$yend[i] <- nodes$y[nodes$name == edges$to[i]]
+  
+}
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()
+        )
+
+png('c3d_mgdmb_tcells_cluster9_gsea_go_enrichmap.png', width = 600, height = 600)
+print(p)
+dev.off()
+
+p <- ggplot() + 
+  geom_segment(aes(x = x, xend = xend, y = y, yend = yend, size = weight), data = edges, color = 'grey', size = 1) + 
+  geom_point(aes(x = x, y = y, color = color, size = size), data = nodes) +
+  theme_classic() +
+  scale_color_gradient(low = 'blue', high = 'red', name = 'NES') +
+  scale_size_continuous(range = c(2,10), name = 'n sig genes') +
+  theme(plot.margin = unit(c(.5,.5,.5,.5),'cm'), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.line = element_blank()) +
+  geom_label(aes(x = x, y = y, label = node_id), data = nodes)
+
+
+png('c3d_mgdmb_tcells_cluster9_gsea_go_enrichmap_label.png', width = 1000, height = 1000)
+print(p)
+dev.off()
+
+```
+
+## Combined
+```{r}
+gsea <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_gsea_go.csv')
+gsea <- gsea %>% filter(cluster %in% c(10,3,4,5,8,0,1,2,12,15,9))
+
+## pathways were hand picked outside of R
+paths_pick <- read_excel('pathways_sig_4_genes_cascalho_picked.xlsx')
+
+gsea1 <- gsea %>% filter(qvalue < .05 & n_sig_genes >= 4 & ID %in% unique(paths_pick$ID)) 
+
+df <- gsea %>% filter(ID %in% unique(gsea1$ID)) %>% 
+  mutate(cluster = factor(cluster, levels = c(10,3,4,5,8,0,1,2,12,15,9)),
+         path_group = paths_pick$group[match(ID, paths_pick$ID)])
+p <- df %>% ggplot(aes(cluster, reorder(Description, path_group), color = NES, size = n_sig_genes)) + geom_point() +
+  scale_color_viridis_c() + theme_bw() + scale_size(range = c(0,8)) + 
+  theme(axis.title.y = element_blank(), axis.title.x = element_blank())
+
+png('c3d_mgdmb_gsea_go_pathways_picked_all_celltypes.png', width = 600, height = 1800)
+print(p)
+dev.off()
+
+# w/out erythroid
+df <- gsea %>% filter(ID %in% unique(gsea1$ID) & cluster != 12) %>% 
+  mutate(cluster = factor(cluster, levels = c(10,3,4,5,8,0,1,2,15,9)),
+         path_group = paths_pick$group[match(ID, paths_pick$ID)])
+p <- df %>% ggplot(aes(cluster, reorder(Description, path_group), color = NES, size = n_sig_genes)) + geom_point() +
+  scale_color_viridis_c() + theme_bw() + scale_size(range = c(0,8)) + 
+  theme(axis.title.y = element_blank(), axis.title.x = element_blank())
+
+png('c3d_mgdmb_gsea_go_pathways_picked_all_celltypes_no_erythroid.png', width = 600, height = 1800)
+print(p)
+dev.off()
+
+
+```
+
+```{r}
+# w/out erythroid and cluster 0 (granulocyte)
+# clusters combined as cell types
+# hierarchical clustering on pathways and cell types
+
+celltypes <- c('plasma','B', 'B', 'monocytes', 'monocytes', 'granulocytes', 'granulocytes', 'pDCs', 'T')
+names(celltypes) <- c(10,3,4,5,8,1,2,15,9)
+
+gsea <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_gsea_go.csv')
+gsea <- gsea %>% filter(cluster %in% names(celltypes))
+
+paths_pick <- read_excel('pathways_sig_4_genes_cascalho_picked.xlsx')
+
+gsea1 <- gsea %>% filter(qvalue < .05 & n_sig_genes >= 4 & ID %in% unique(paths_pick$ID)) 
+
+df <- gsea %>% filter(ID %in% unique(gsea1$ID)) %>% mutate(cluster = factor(cluster, levels = names(celltypes)))
+df1 <- df %>% complete(Description, cluster) %>% dplyr::select(Description, cluster, NES, n_sig_genes, qvalue) %>% 
+  mutate(path_group = paths_pick$group[match(Description, paths_pick$Description)])
+df1$NES[is.na(df1$NES)] <- 0
+df1$n_sig_genes[is.na(df1$n_sig_genes)] <- 0
+df1$qvalue[is.na(df1$qvalue)] <- 1
+df1 <- df1 %>% mutate(celltype = celltypes[match(cluster, names(celltypes))])
+df2 <- df1 %>% group_by(celltype,Description) %>% 
+  mutate(celltype_NES = mean(NES), 
+         celltype_n_sig_genes = mean(n_sig_genes),
+         celltype_qvalue = mean(qvalue)) %>% 
+  dplyr::select(Description, path_group, celltype, celltype_NES, celltype_n_sig_genes, celltype_qvalue) %>%
+  unique()
+
+x <- df2 %>% reshape2::dcast(Description ~ celltype, value.var = 'celltype_qvalue') %>% column_to_rownames('Description')
+
+clust_row <- hclust(dist(x))
+x1 <- rownames(x)[clust_row$order]
+df2 <- df2 %>% mutate(Description = factor(Description, levels = x1))
+
+clust_col <- hclust(dist(t(x)))
+x1 <- colnames(x)[clust_col$order]
+df2 <- df2 %>% mutate(celltype = factor(celltype, levels = x1))
+
+p <- df2 %>% ggplot(aes(celltype, Description, color = celltype_NES, size = celltype_n_sig_genes)) + geom_point() +
+  scale_color_viridis_c() + theme_bw() + scale_size(range = c(0,8)) + coord_flip() +
+  theme(axis.title.y = element_blank(), axis.title.x = element_blank(), 
+        axis.text.x = element_text(size = 15, angle = 45, hjust = 1, vjust = 1), plot.margin = margin(10,10,10,120))
+
+png('c3d_mgdmb_gsea_go_pathways_picked_dot_plot_110823.png', width = 1300, height = 600)
+print(p)
+dev.off()
+
+
+```
+
+```{r}
+# w/out erythroid and cluster 0 (granulocyte)
+# clusters combined as cell types
+# pathways combined into groups
+# hierarchical clustering on pathways and cell types
+
+celltypes <- c('plasma','B', 'B', 'monocytes', 'monocytes', 'granulocytes', 'granulocytes', 'pDCs', 'T')
+names(celltypes) <- c(10,3,4,5,8,1,2,15,9)
+
+gsea <- read_csv('c3d_mgdmb_clusters_c3d_vs_pbs_gsea_go.csv')
+gsea <- gsea %>% filter(cluster %in% names(celltypes))
+
+paths_pick <- read_excel('pathways_sig_4_genes_cascalho_picked.xlsx')
+
+gsea1 <- gsea %>% filter(qvalue < .05 & n_sig_genes >= 4 & ID %in% unique(paths_pick$ID)) 
+
+df <- gsea %>% filter(ID %in% unique(gsea1$ID)) %>% mutate(cluster = factor(cluster, levels = names(celltypes)))
+df1 <- df %>% complete(Description, cluster) %>% dplyr::select(Description, cluster, NES, n_sig_genes, qvalue) %>% 
+  mutate(path_group = paths_pick$group[match(Description, paths_pick$Description)])
+df1$NES[is.na(df1$NES)] <- 0
+df1$n_sig_genes[is.na(df1$n_sig_genes)] <- 0
+df1$qvalue[is.na(df1$qvalue)] <- 1
+df1 <- df1 %>% mutate(celltype = celltypes[match(cluster, names(celltypes))])
+df2 <- df1 %>% group_by(celltype,path_group) %>% 
+  mutate(celltype_NES = mean(NES), 
+         celltype_n_sig_genes = mean(n_sig_genes),
+         celltype_qvalue = mean(qvalue)) %>% 
+  dplyr::select(path_group, celltype, celltype_NES, celltype_n_sig_genes, celltype_qvalue) %>%
+  unique()
+
+x <- df2 %>% reshape2::dcast(path_group ~ celltype, value.var = 'celltype_qvalue') %>% column_to_rownames('path_group')
+
+clust_row <- hclust(dist(x))
+x1 <- rownames(x)[clust_row$order]
+df2 <- df2 %>% mutate(path_group = factor(path_group, levels = x1))
+
+clust_col <- hclust(dist(t(x)))
+x1 <- colnames(x)[clust_col$order]
+df2 <- df2 %>% mutate(celltype = factor(celltype, levels = x1))
+
+p <- df2 %>% ggplot(aes(celltype, path_group, color = celltype_NES, size = celltype_n_sig_genes)) + geom_point() +
+  scale_color_viridis_c() + theme_bw() + scale_size(range = c(0,8)) + coord_flip() +
+  theme(axis.title.y = element_blank(), axis.title.x = element_blank())
+
+png('c3d_mgdmb_gsea_go_pathways_picked_path_groups_dot_plot_110823.png', width = 500, height = 300)
+print(p)
+dev.off()
 
 ```
