@@ -1,10 +1,9 @@
 # C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity Analysis
-Code and other plots from scRNA-seq analysis for the "C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity" article
+Code and other plots from scRNA-seq and bulk RNA-seq analysis for the "C3d protein in multiple myeloma: segregating tumor immunity and autoimmunity" article
 
-The analysis was done in two parts:
+The scRNA-seq analysis was done in two part:
 	CellRanger: Pre-processing of FASTQ to counts
 	Seurat: Processing of counts to downstream analyses shown in the article
-
 
 ## CellRanger
 
